@@ -1,259 +1,311 @@
 var Promise = (function (undefined) {
 
-	// promise 的状态
-	var PENDING = 0,
-		FULFILLED = 1,
-		REJECTED = 2;
+  // promise 的状态
+  var PENDING = 0,
+    FULFILLED = 1,
+    REJECTED = 2;
 
-	// promise 编号计数，用于调试
-	var counter = 0;
+  // promise 编号计数，用于调试
+  var counter = 0;
 
-	function noop() { }
+  function noop() { }
 
-	// 规范里是将FulfillReactions和RejectReactions
-	// 放入操作队列，这里简单调用timeout完成
-	function asap(callback, arg) {
-		setTimeout(function () {
-			callback(arg);
-		}, 0);
-	}
+  // 规范里是将FulfillReactions和RejectReactions
+  // 放入操作队列，这里简单调用timeout完成
+  function asap(callback, arg) {
+    setTimeout(function () {
+      callback(arg);
+    }, 0);
+  }
 
-	function resolve(promise, value) {
-		if (promise._state !== PENDING) { return; }
+  function handleOwnThenable(promise, thenable) {
+    // 如果返回的promise已经完成
+    // 直接用该promise的值resolve父promise
+    if (thenable._state === FULFILLED) {
+      resolve(promise, thenable._result);
+    } else if (thenable._state === REJECTED) {
+      reject(promise, thenable._result);
+    }
+    // 如果返回的promise未完成
+    // 要等该promise完成再resolve父promise
+    else {
+      subscribe(thenable, undefined, function (value) {
+        resolve(promise, value);
+      }, function (reason) {
+        reject(promise, reason);
+      });
+    }
+  }
 
-		promise._result = value;
-		promise._state = FULFILLED;
+  function resolve(promise, value) {
+    // 要resolve的为promise（then的callback返回的是promise）
+    if (typeof value === 'object' && promise.constructor === value.constructor) {
+      handleOwnThenable(promise, value);
+    }
+    // 要resolve的是值
+    else {
+      if (promise._state !== PENDING) {
+        return;
+      }
 
-		asap(publish, promise);
-	}
+      promise._result = value;
+      promise._state = FULFILLED;
 
-	function reject(promise, reason) {
-		if (promise._state !== PENDING) { return; }
-		promise._state = REJECTED;
-		promise._result = reason;
+      asap(publish, promise);
+    }
+  }
 
-		asap(publish, promise);
-	}
+  function reject(promise, reason) {
+    if (promise._state !== PENDING) {
+      return;
+    }
+    promise._state = REJECTED;
+    promise._result = reason;
 
-	function publish(promise) {
-		var subscribers = promise._subscribers;
-		var settled = promise._state;
+    asap(publish, promise);
+  }
 
-		if (subscribers.length === 0) { return; }
+  function publish(promise) {
+    var subscribers = promise._subscribers;
+    var settled = promise._state;
 
-		var child, callback, detail = promise._result;
+    if (subscribers.length === 0) {
+      return;
+    }
 
-		for (var i = 0; i < subscribers.length; i += 3) {
-			child = subscribers[i];
-			callback = subscribers[i + settled];
+    var child, callback, detail = promise._result;
 
-			// promise订阅，需要解析（resolve或reject）
-			if (child) {
-				invokeCallback(settled, child, callback, detail);
-			}
-			// 回调函数订阅，执行即可
-			else {
-				callback(detail);
-			}
-		}
+    for (var i = 0; i < subscribers.length; i += 3) {
+      child = subscribers[i];
+      callback = subscribers[i + settled];
 
-		promise._subscribers.length = 0;
-	}
+      // promise订阅，需要解析（resolve或reject）
+      if (child) {
+        invokeCallback(settled, child, callback, detail);
+      }
+      // 回调函数订阅，执行即可
+      else {
+        callback(detail);
+      }
+    }
 
-	function subscribe(parent, child, onFulfillment, onRejection) {
-		var subscribers = parent._subscribers;
-		var length = subscribers.length;
+    promise._subscribers.length = 0;
+  }
 
-		subscribers[length] = child;
-		subscribers[length + FULFILLED] = onFulfillment;
-		subscribers[length + REJECTED] = onRejection;
+  function subscribe(parent, child, onFulfillment, onRejection) {
+    var subscribers = parent._subscribers;
+    var length = subscribers.length;
 
-		if (parent._state) {
-			asap(publish, parent);
-		}
-	}
+    subscribers[length] = child;
+    subscribers[length + FULFILLED] = onFulfillment;
+    subscribers[length + REJECTED] = onRejection;
 
-	function invokeCallback(settled, promise, callback, detail) {
-		var hasCallback = (typeof callback === 'function'),
-			value, error, succeeded, failed;
+    if (parent._state) {
+      asap(publish, parent);
+    }
+  }
 
-		if (hasCallback) {
+  function invokeCallback(settled, promise, callback, detail) {
+    var hasCallback = (typeof callback === 'function'),
+      value, error, succeeded, failed;
 
-			try {
-				value = callback(detail);
-			} catch (e) {
-				value = { error: e };
-			}
+    if (hasCallback) {
 
-			if (value && !!value.error) {
-				failed = true;
-				error = value.error;
-				value = null;
-			} else {
-				succeeded = true;
-			}
+      try {
+        value = callback(detail);
+      } catch (e) {
+        value = {
+          error: e
+        };
+      }
 
-		} else {
-			value = detail;
-			succeeded = true;
-		}
+      if (value && !!value.error) {
+        failed = true;
+        error = value.error;
+        value = null;
+      } else {
+        succeeded = true;
+      }
 
-		if (promise._state === PENDING) {
-			if (hasCallback && succeeded || settled === FULFILLED) {
-				resolve(promise, value);
-			} else if (failed || settled === REJECTED) {
-				reject(promise, error);
-			}
-		}
-	}
+    }
+    // then的参数不是函数
+    // 会被忽略，也就是promise穿透
+    else {
+      value = detail;
+      succeeded = true;
+    }
 
-	function Promise(resolver) {
-		this._id = counter++;
-		this._state = PENDING;
-		this._result = undefined;
-		this._subscribers = [];
+    if (promise._state === PENDING) {
+      if (hasCallback && succeeded || settled === FULFILLED) {
+        resolve(promise, value);
+      } else if (failed || settled === REJECTED) {
+        reject(promise, error);
+      }
+    }
+  }
 
-		var promise = this;
+  function Promise(resolver) {
+    this._id = counter++;
+    this._state = PENDING;
+    this._result = undefined;
+    this._subscribers = [];
 
-		if (noop !== resolver) {
-			try {
-				resolver(function (value) {
-					resolve(promise, value);
-				}, function (reason) {
-					reject(promise, reason);
-				});
-			} catch (e) {
-				reject(promise, e);
-			}
-		}
-	}
+    var promise = this;
 
-	Promise.resolve = function (arg) {
-		var child = new Promise(noop);
-		resolve(child, arg);
-		return child;
-	};
+    if (noop !== resolver) {
+      try {
+        resolver(function (value) {
+          resolve(promise, value);
+        }, function (reason) {
+          reject(promise, reason);
+        });
+      } catch (e) {
+        reject(promise, e);
+      }
+    }
+  }
 
-	Promise.reject = function (reason) {
-		var child = new Promise(noop);
-		reject(child, reason);
-		return child;
-	};
+  Promise.resolve = function (arg) {
+    var child = new Promise(noop);
+    resolve(child, arg);
+    return child;
+  };
 
-	Promise.all = function (promises) {
-		var child = new Promise(noop);
-		var record = {
-			remain: promises.length,
-			values: []
-		};
-		promises.forEach(function (promise, i) {
-			if (promise._state === PENDING) {
-				subscribe(promise, undefined, onFulfilled(i), onRejected);
-			} else if (promise._state === REJECTED) {
-				reject(child, promise._result);
-				return false;
-			} else {
-				--record.remain;
-				record.values[i] = promise._result;
-				if (record.remain == 0) {
-					resolve(child, values);
-				}
-			}
-		});
-		return child;
+  Promise.reject = function (reason) {
+    var child = new Promise(noop);
+    reject(child, reason);
+    return child;
+  };
 
-		function onFulfilled(i) {
-			return function (val) {
-				--record.remain;
-				record.values[i] = val;
-				if (record.remain == 0) {
-					resolve(child, record.values);
-				}
-			}
-		}
-		function onRejected(reason) {
-			reject(child, reason);
-		}
-	};
+  Promise.all = function (promises) {
+    var child = new Promise(noop);
+    var record = {
+      remain: promises.length,
+      values: []
+    };
+    promises.forEach(function (promise, i) {
+      if (promise._state === PENDING) {
+        subscribe(promise, undefined, onFulfilled(i), onRejected);
+      } else if (promise._state === REJECTED) {
+        reject(child, promise._result);
+        return false;
+      } else {
+        --record.remain;
+        record.values[i] = promise._result;
+        if (record.remain == 0) {
+          resolve(child, values);
+        }
+      }
+    });
+    return child;
 
-	Promise.race = function (promises) {
-		var child = new Promise(noop);
+    function onFulfilled(i) {
+      return function (val) {
+        --record.remain;
+        record.values[i] = val;
+        if (record.remain == 0) {
+          resolve(child, record.values);
+        }
+      }
+    }
 
-		promises.forEach(function (promise, i) {
-			if (promise._state === PENDING) {
-				subscribe(promise, undefined, onFulfilled, onRejected);
-			} else if (promise._state === REJECTED) {
-				reject(child, promise._result);
-				return false;
-			} else {
-				resolve(child, promise._result);
-				return false;
-			}
-		});
-		return child;
+    function onRejected(reason) {
+      reject(child, reason);
+    }
+  };
 
-		function onFulfilled(val) {
-			resolve(child, val);
-		}
-		function onRejected(reason) {
-			reject(child, reason);
-		}
-	};
+  Promise.race = function (promises) {
+    var child = new Promise(noop);
 
-	Promise.prototype = {
-		constructor: Promise,
+    promises.forEach(function (promise, i) {
+      if (promise._state === PENDING) {
+        subscribe(promise, undefined, onFulfilled, onRejected);
+      } else if (promise._state === REJECTED) {
+        reject(child, promise._result);
+        return false;
+      } else {
+        resolve(child, promise._result);
+        return false;
+      }
+    });
+    return child;
 
-		then: function (onFulfillment, onRejection) {
-			var parent = this;
-			var state = parent._state;
+    function onFulfilled(val) {
+      resolve(child, val);
+    }
 
-			if (state === FULFILLED && !onFulfillment
-				|| state === REJECTED && !onRejection) {
-				return this;
-			}
+    function onRejected(reason) {
+      reject(child, reason);
+    }
+  };
 
-			var child = new Promise(noop);
-			var result = parent._result;
+  Promise.prototype = {
+    constructor: Promise,
 
-			if (state) {
-				var callback = arguments[state - 1];
-				asap(function () {
-					invokeCallback(state, child, callback, result);
-				});
-			} else {
-				subscribe(parent, child, onFulfillment, onRejection);
-			}
+    then: function (onFulfillment, onRejection) {
+      var parent = this;
+      var state = parent._state;
 
-			return child;
-		},
+      if (state === FULFILLED && !onFulfillment || state === REJECTED && !onRejection) {
+        return this;
+      }
 
-		'catch': function (onRejection) {
-			return this.then(null, onRejection);
-		}
-	};
+      var child = new Promise(noop);
+      var result = parent._result;
 
-	return Promise;
+      if (state) {
+        var callback = arguments[state - 1];
+        asap(function () {
+          invokeCallback(state, child, callback, result);
+        });
+      } else {
+        subscribe(parent, child, onFulfillment, onRejection);
+      }
+
+      return child;
+    },
+
+    'catch': function (onRejection) {
+      return this.then(null, onRejection);
+    }
+  };
+
+  return Promise;
 })();
 
 var p1 = new Promise(function (resolve, reject) {
-	setTimeout(function () {
-		resolve(123);
-	}, 100);
+  setTimeout(function () {
+    resolve(123);
+  }, 100);
 });
 
 var p2 = new Promise(function (resolve, reject) {
-	setTimeout(function () {
-		resolve(223);
-	}, 500);
+  setTimeout(function () {
+    resolve(223);
+  }, 500);
 });
 
 var p3 = new Promise(function (resolve, reject) {
-	setTimeout(function () {
-		resolve(323);
-	}, 300);
+  setTimeout(function () {
+    resolve(323);
+  }, 300);
 });
 
 
-Promise.race([p1, p2, p3]).then(function (vals) {
-	console.log(vals);
+// Promise.race([p1, p2, p3]).then(function (vals) {
+// 	console.log(vals);
+// });
+
+p3.then(function (val) {
+  return new Promise(function (resl, rej) {
+    setTimeout(function () {
+      resl(val);
+    }, 100);
+  });
+}).then(function (val) {
+  console.log(val);
+})
+
+Promise.resolve('foo').then(Promise.resolve('bar')).then(function (result) {
+  console.log(result);
 });
